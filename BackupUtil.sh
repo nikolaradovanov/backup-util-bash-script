@@ -135,7 +135,8 @@ add_path_to_json() {
 }
 
 compress_folders() {
-    TMP_ARCHIVE="/tmp/backup"
+    TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+    TMP_ARCHIVE="/tmp/BackUp_${TIMESTAMP}"
 
     # Read compression mode from JSON
     COMPRESS_MODE=$(jq -r '.compressionMode' "$CONFIG_FILE")
@@ -168,15 +169,52 @@ compress_folders() {
 }
 
 copy_to_destinations() {
+    
+    # Extract destination paths and their UUIDs
+    DEST_PATHS=($(jq -r '.destinationPaths[].path' "$CONFIG_FILE"))
+    DEST_UUIDS=($(jq -r '.destinationPaths[].uuid' "$CONFIG_FILE"))
 
-    #TODO
-    echo "add cp logic"
+    for i in "${!DEST_PATHS[@]}"; do
+        local mount_point=$(df --output=target "${DEST_PATHS[i]}" | tail -n1)
+        MOUNTED_UUID=$(findmnt -no UUID "$mount_point")
+
+        if [[ -z "$MOUNTED_UUID" || "$MOUNTED_UUID" != "${DEST_UUIDS[i]}" ]]; then
+            echo "Error: Destination path ${DEST_PATHS[i]} is unavailable or not mounted." >&2
+        else
+            cp "$TMP_ARCHIVE" "${DEST_PATHS[i]}"
+            echo "Copied $TMP_ARCHIVE to ${DEST_PATHS[i]}"
+        fi
+    done
 }
 
 remove_excess_backups() {
+    # Extract destination paths and number of copies from JSON
+    NUMBER_OF_COPIES=$(jq -r '.numberOfCopies' "$CONFIG_FILE")
 
-    #TODO
-    echo "Add remove logic"
+    for DEST_PATH in "${DEST_PATHS[@]}"; do
+        # Check if the destination directory exists
+        if [[ -d "$DEST_PATH" ]]; then
+            # List all backup files sorted by modification time (oldest first)
+            BACKUPS=("$DEST_PATH"/BackUp_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]*) # Assuming backups start with BackUp_
+            BACKUP_COUNT=${#BACKUPS[@]}
+
+            if (( BACKUP_COUNT > NUMBER_OF_COPIES )); then
+                # Calculate how many backups to remove
+                TO_REMOVE=$(( BACKUP_COUNT - NUMBER_OF_COPIES ))
+
+                # Remove the oldest backups
+                echo "Removing $TO_REMOVE oldest backup(s) from $DEST_PATH"
+                for ((i=0; i<TO_REMOVE; i++)); do
+                    rm -f "${BACKUPS[i]}"
+                    echo "Removed ${BACKUPS[i]}"
+                done
+            else
+                echo "No excess backups to remove in $DEST_PATH"
+            fi
+        else
+            echo "Error: Destination path $DEST_PATH does not exist or is not a directory." >&2
+        fi
+    done
 }
 
 load_the_config
