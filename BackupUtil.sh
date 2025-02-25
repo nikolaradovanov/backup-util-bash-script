@@ -89,10 +89,8 @@ fi
 MAX_BACKUPS_NUMBER=$(jq '.numberOfCopies' "$CONFIG_FILE")
 COMPRESS_MODE=$(jq '.compressionMode' "$CONFIG_FILE")
 CRON=$(jq '.executionTime' "$CONFIG_FILE")
-ORIGIN_PATHS=($(jq -r '.originPaths[]' "$CONFIG_FILE"))
 DESTINATION_PATHS=($(jq -r '.destinationPaths[]' "$CONFIG_FILE"))
 
-#echo "ORIGIN_PATHS: ${ORIGIN_PATHS[@]}"
 }
 
 print_help () {
@@ -104,15 +102,22 @@ add_path_to_json() {
     local key="$2"
 
     if [[ -d "$path" ]]; then
-        # Get the device UUID
-        local uuid=$(findmnt -no UUID $path)
+        # Find the actual mount point
+        local mount_point=$(df --output=target "$path" | tail -n1)
 
-        if [[ -z "$uuid" ]]; then
-            echo "Error: Unable to determine UUID for $path" >&2
+        if [[ -z "$mount_point" ]]; then
+            echo "Error: Unable to determine mount point for $path" >&2
             exit 1
         fi
 
-        #TODO this if does not work
+        # Get the UUID of the mount point
+        local uuid=$(findmnt -no UUID "$mount_point")
+
+        if [[ -z "$uuid" ]]; then
+            echo "Error: Unable to determine UUID for $mount_point" >&2
+            exit 1
+        fi
+
         # Check if the entry already exists
         if jq -e --arg p "$path" --arg u "$uuid" ".$key[] | select(.path == \$p and .uuid == \$u)" "$CONFIG_FILE" > /dev/null 2>&1; then
             echo "$path with UUID $uuid is already in $key"
@@ -122,6 +127,7 @@ add_path_to_json() {
                 ".$key += [{path: \$p, uuid: \$u}]" "$CONFIG_FILE" > tmp.json && mv tmp.json "$CONFIG_FILE"
             echo "Added $path with UUID $uuid to $key"
         fi
+        exit 0
     else
         echo "Error: $path is not a valid directory or does not exist." >&2
         exit 1
@@ -130,15 +136,34 @@ add_path_to_json() {
 
 compress_folders() {
     TMP_ARCHIVE="/tmp/backup"
-    
+
+    # Read compression mode from JSON
+    COMPRESS_MODE=$(jq -r '.compressionMode' "$CONFIG_FILE")
+
+    # Extract origin paths and their UUIDs
+    ORIGIN_PATHS=($(jq -r '.originPaths[].path' "$CONFIG_FILE"))
+    ORIGIN_UUIDS=($(jq -r '.originPaths[].uuid' "$CONFIG_FILE"))
+
+    # Verify that all origin paths are available
+    for i in "${!ORIGIN_PATHS[@]}"; do
+        local mount_point=$(df --output=target "${ORIGIN_PATHS[i]}" | tail -n1)
+        MOUNTED_UUID=$(findmnt -no UUID "$mount_point")
+
+        if [[ -z "$MOUNTED_UUID" || "$MOUNTED_UUID" != "${ORIGIN_UUIDS[i]}" ]]; then
+            echo "Error: Origin path ${ORIGIN_PATHS[i]} is unavailable or not mounted." >&2
+            exit 1
+        fi
+    done
+
+    # Determine the archive format
     if [[ "$COMPRESS_MODE" == "tar" ]]; then
         TMP_ARCHIVE+=".tar.gz"
-        tar -czf "$TMP_ARCHIVE" -C / "${ORIGIN_PATHS[@]}"
+        tar -czf "$TMP_ARCHIVE" -C / -- "${ORIGIN_PATHS[@]}"
     else
         TMP_ARCHIVE+=".zip"
         zip -r "$TMP_ARCHIVE" "${ORIGIN_PATHS[@]}"
     fi
-    
+
     echo "Folders compressed to $TMP_ARCHIVE"
 }
 
